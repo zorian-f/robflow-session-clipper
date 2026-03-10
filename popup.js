@@ -29,7 +29,7 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     setUrl(cleanUrl);
   } else {
     // 2. Fall back to stored URL from content script
-    chrome.storage.session.get('robflowSessionUrl', (result) => {
+    chrome.storage.local.get('robflowSessionUrl', (result) => {
       if (result.robflowSessionUrl) {
         setUrl(result.robflowSessionUrl);
         statusHint.textContent = 'Last detected session URL. Click to copy.';

@@ -1,23 +1,30 @@
 (() => {
-  const SESSION_PATTERN = /^https:\/\/api\.robco\.studio\/public\/virtual-robot\/session\/[^/]+/;
+  const SESSION_PATTERN = /^https:\/\/api\.robco\.studio\/public\/virtual-robot\/session\/[^"'\s/]+/;
 
-  const sessionUrl = window.location.href;
+  let detected = false;
 
-  if (!SESSION_PATTERN.test(sessionUrl)) return;
+  function tryDetect() {
+    if (detected) return true;
 
-  // Normalise: strip trailing slash variations but keep clean
-  const cleanUrl = sessionUrl.replace(/\/$/, '') + '/';
+    const iframe = document.querySelector('iframe[src*="api.robco.studio/public/virtual-robot/session/"]');
+    if (!iframe) return false;
 
-  // Store for popup access
-  chrome.storage.session.set({ robflowSessionUrl: cleanUrl });
+    const match = iframe.src.match(SESSION_PATTERN);
+    if (!match) return false;
 
-  // Auto-copy to clipboard
-  navigator.clipboard.writeText(cleanUrl).then(() => {
-    showToast('Session URL copied to clipboard!', true);
-  }).catch(() => {
-    // Clipboard write can fail if page isn't focused — show URL anyway
-    showToast('Session URL detected (open popup to copy)', false);
-  });
+    detected = true;
+    const cleanUrl = match[0].replace(/\/$/, '') + '/';
+
+    chrome.storage.local.set({ robflowSessionUrl: cleanUrl });
+
+    navigator.clipboard.writeText(cleanUrl).then(() => {
+      showToast('Session URL copied to clipboard!', true);
+    }).catch(() => {
+      showToast('Session URL detected (open popup to copy)', false);
+    });
+
+    return true;
+  }
 
   function showToast(message, success) {
     const existing = document.getElementById('__robflow_toast');
@@ -49,8 +56,17 @@
     toast.addEventListener('click', () => toast.remove());
     document.body.appendChild(toast);
 
-    // Fade out after 3 s, remove after fade
     setTimeout(() => { toast.style.opacity = '0'; }, 3000);
     setTimeout(() => { toast.remove(); }, 3500);
+  }
+
+  // Try immediately (iframe may already be in DOM at document_idle)
+  if (!tryDetect()) {
+    // Vue renders the iframe dynamically — watch for it
+    const observer = new MutationObserver(() => {
+      if (tryDetect()) observer.disconnect();
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => observer.disconnect(), 30000);
   }
 })();

@@ -16,8 +16,14 @@ body {
 .header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  justify-content: space-between;
   margin-bottom: 14px;
+}
+
+.header-logo {
+  height: 22px;
+  width: auto;
+  filter: invert(1);
 }
 
 .header-dot {
@@ -30,13 +36,6 @@ body {
 
 .header-dot.active {
   background: #30d158;
-}
-
-.header-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: #f2f2f7;
-  letter-spacing: 0.2px;
 }
 
 .label {
