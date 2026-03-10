@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RobFlow Session Clipper</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="header-dot" id="statusDot"></div>
+    <span class="header-title">RobFlow Session Clipper</span>
+  </div>
+
+  <div class="label">Session URL</div>
+  <div class="url-box empty" id="urlDisplay">Not on a session page</div>
+
+  <button class="copy-btn" id="copyBtn" disabled>Copy to Clipboard</button>
+
+  <div class="status-hint" id="statusHint">
+    Navigate to a RobFlow virtual robot session to auto-copy.
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

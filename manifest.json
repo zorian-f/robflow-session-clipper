@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "RobFlow Session Clipper",
+  "version": "1.0.0",
+  "description": "Auto-copies the RobFlow virtual robot session URL to your clipboard.",
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "RobFlow Session Clipper"
+  },
+  "permissions": [
+    "clipboardWrite",
+    "activeTab",
+    "storage"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://api.robco.studio/public/virtual-robot/session/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
