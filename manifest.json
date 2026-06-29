@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "RobFlow Session Clipper",
-  "version": "1.0.0",
-  "description": "Auto-copies the RobFlow virtual robot session URL to your clipboard.",
+  "version": "2.0.0",
+  "description": "Auto-captures the RobFlow session + Cognito token and opens the viewer with one click (no DevTools copy).",
   "action": {
     "default_popup": "popup.html",
     "default_title": "RobFlow Session Clipper",
@@ -22,8 +22,15 @@
   "permissions": [
     "clipboardWrite",
     "activeTab",
-    "storage"
+    "storage",
+    "webRequest"
   ],
+  "host_permissions": [
+    "https://api.robco.studio/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://robco.studio/cloud-robflow*"],

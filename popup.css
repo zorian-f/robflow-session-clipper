@@ -43,61 +43,119 @@ body {
   color: #636366;
   text-transform: uppercase;
   letter-spacing: 0.6px;
-  margin-bottom: 6px;
 }
 
-.url-box {
-  background: #2c2c2e;
-  border: 1px solid #3a3a3c;
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 11px;
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid #2c2c2e;
+}
+
+.value {
+  font-size: 12px;
   color: #ebebf5;
+  text-align: right;
   word-break: break-all;
-  line-height: 1.5;
-  min-height: 42px;
-  margin-bottom: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
-.url-box.empty {
+.value.empty {
   color: #636366;
   font-style: italic;
 }
 
-.copy-btn {
+.value.ok {
+  color: #30d158;
+}
+
+.value.warn {
+  color: #ff9f0a;
+}
+
+.primary-btn {
   width: 100%;
-  padding: 9px;
-  background: #0a84ff;
+  margin-top: 14px;
+  padding: 10px;
+  background: #2c6e49;
   color: #fff;
   border: none;
   border-radius: 6px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: background 0.15s;
 }
 
-.copy-btn:hover {
-  background: #409cff;
+.primary-btn:hover {
+  background: #35895a;
 }
 
-.copy-btn:active {
-  background: #0060df;
+.primary-btn:active {
+  background: #245c3d;
 }
 
-.copy-btn:disabled {
+.primary-btn:disabled {
   background: #3a3a3c;
   color: #636366;
   cursor: default;
 }
 
-.copy-btn.success {
-  background: #2c6e49;
+.viewer-row {
+  margin-top: 14px;
+}
+
+#viewerUrl {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  background: #2c2c2e;
+  border: 1px solid #3a3a3c;
+  border-radius: 6px;
+  color: #ebebf5;
+  font-size: 11px;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+
+#viewerUrl:focus {
+  outline: none;
+  border-color: #0a84ff;
+}
+
+.copy-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.ghost-btn {
+  flex: 1;
+  padding: 7px;
+  background: transparent;
+  color: #9da7b3;
+  border: 1px solid #3a3a3c;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.ghost-btn:hover:not(:disabled) {
+  border-color: #636366;
+  color: #ebebf5;
+}
+
+.ghost-btn:disabled {
+  color: #4a4a4c;
+  cursor: default;
 }
 
 .status-hint {
-  margin-top: 10px;
+  margin-top: 12px;
   font-size: 10px;
   color: #636366;
   text-align: center;
+  line-height: 1.5;
 }

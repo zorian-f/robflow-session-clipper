@@ -12,13 +12,29 @@
     <div class="header-dot" id="statusDot"></div>
   </div>
 
-  <div class="label">Session URL</div>
-  <div class="url-box empty" id="urlDisplay">Not on a session page</div>
+  <div class="row">
+    <span class="label">Session</span>
+    <span class="value" id="sidValue">—</span>
+  </div>
+  <div class="row">
+    <span class="label">Control token</span>
+    <span class="value" id="tokenValue">—</span>
+  </div>
 
-  <button class="copy-btn" id="copyBtn" disabled>Copy to Clipboard</button>
+  <button class="primary-btn" id="openBtn" disabled>▶ Open in viewer</button>
+
+  <div class="viewer-row">
+    <label class="label" for="viewerUrl">Viewer URL</label>
+    <input id="viewerUrl" type="text" spellcheck="false" placeholder="https://orrerium.web.app" />
+  </div>
+
+  <div class="copy-row">
+    <button class="ghost-btn" id="copyUrlBtn" disabled>Copy URL</button>
+    <button class="ghost-btn" id="copyTokenBtn" disabled>Copy token</button>
+  </div>
 
   <div class="status-hint" id="statusHint">
-    Navigate to a RobFlow virtual robot session to auto-copy.
+    Navigate to a RobFlow virtual robot session to auto-capture.
   </div>
 
   <script src="popup.js"></script>
