@@ -20,10 +20,11 @@ body {
   margin-bottom: 14px;
 }
 
-.header-logo {
-  height: 22px;
-  width: auto;
-  filter: invert(1);
+.header-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f2f2f7;
+  letter-spacing: 0.2px;
 }
 
 .header-dot {
