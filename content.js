@@ -1,7 +1,6 @@
 (() => {
     const SESSION_PATTERN = /^https:\/\/api\.robco\.studio\/public\/virtual-robot\/session\/[^"'\s/]+/;
     const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
-    const STATUS_URL = 'https://api.robco.studio/public/virtual-robot/status';
     const DEFAULT_VIEWER = 'https://orrerium.web.app';
     // Amplify/Cognito keys the stored token by APP CLIENT id (not the pool id) — scope to RobCo's
     // client so we never pick up some other Cognito app's token that shares this origin.
@@ -9,6 +8,7 @@
     const ID_TOKEN_KEY = new RegExp(`^CognitoIdentityServiceProvider\\.${COGNITO_CLIENT}\\..+\\.idToken$`);
 
     let detectedSid = false;
+    let lastSessionUrl = null;
     let lastCaptureAt = 0;
 
     // --- SID detection (the session iframe) ----------------------------------------------------
@@ -21,6 +21,7 @@
 
         detectedSid = true;
         const cleanUrl = match[0].replace(/\/$/, '') + '/';
+        lastSessionUrl = cleanUrl;
         chrome.storage.local.set({ robflowSessionUrl: cleanUrl });
         showToast('RobFlow session captured — open the popup to launch the viewer.', true);
         ensureLaunchButton();
@@ -59,24 +60,6 @@
         return `${root}/?${q.toString()}`;
     }
 
-    // The SID embedded in the page can go stale when a cloud session is re-provisioned. When we
-    // hold a live token, re-derive the CURRENT SID from /status — mirrors the viewer's own reload
-    // logic (devLoad.restoreSavedSession). Falls back to the page-detected SID if the call fails.
-    async function currentSid(token, fallbackSid) {
-        if (token) {
-            try {
-                const res = await fetch(STATUS_URL, { headers: { Authorization: `Bearer ${token}` } });
-                if (res.ok) {
-                    const data = await res.json();
-                    if (data && data.token) return data.token;
-                }
-            } catch {
-                /* offline / expired — fall through */
-            }
-        }
-        return fallbackSid;
-    }
-
     function ensureLaunchButton() {
         if (document.getElementById('__robflow_launch')) return;
         const btn = document.createElement('button');
@@ -90,15 +73,26 @@
             boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
         });
         btn.addEventListener('click', () => {
-            chrome.storage.local.get(['robflowSessionUrl', 'robflowToken', 'viewerBaseUrl'], async (s) => {
+            if (!lastSessionUrl) { showToast('No session detected yet.', false); return; }
+            const sid = (lastSessionUrl.match(SID_RE) || [])[1];
+            if (!sid) { showToast('Malformed session URL — reload the session tab.', false); return; }
+            // Fire the clipboard write synchronously inside the click gesture (best chance of success
+            // in the page context), then report the REAL result rather than assuming it copied —
+            // a page Permissions-Policy or lost focus can still reject it.
+            let copied;
+            try {
+                copied = navigator.clipboard.writeText(lastSessionUrl).then(() => true, () => false);
+            } catch {
+                copied = Promise.resolve(false);
+            }
+            chrome.storage.local.get(['robflowToken', 'viewerBaseUrl'], (s) => {
                 const tok = s.robflowToken;
-                const live = tok && tok.exp * 1000 > Date.now();
-                const token = live ? tok.value : null;
-                const stored = (s.robflowSessionUrl || '').match(SID_RE);
-                const sid = await currentSid(token, stored ? stored[1] : null);
-                if (!sid) { showToast('No session detected yet.', false); return; }
-                if (!token) showToast('Opening view-only (no live control token).', false);
+                const token = tok && tok.exp * 1000 > Date.now() ? tok.value : null;
+                const mode = token ? 'control' : 'view-only';
                 window.open(buildViewerUrl(s.viewerBaseUrl, sid, token), '_blank', 'noopener');
+                copied.then((ok) => showToast(
+                    ok ? `Session URL copied — opened viewer (${mode}).`
+                       : `Opened viewer (${mode}) — clipboard copy was blocked.`, ok));
             });
         });
         document.body.appendChild(btn);

@@ -44,6 +44,7 @@ off RobFlow API traffic.
 1. Open a RobFlow session at `robco.studio/cloud-robflow` and stay signed in (Google).
 2. Click the extension icon (or the on-page **Open in viewer** button).
 3. The viewer opens already connected — controllable if a live token was captured, view-only otherwise.
+   Launching also copies the **fresh session URL** (`…/session/<SID>/`) to your clipboard.
 
 ## Notes & limitations
 

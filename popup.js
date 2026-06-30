@@ -1,6 +1,8 @@
 const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
 const DEFAULT_VIEWER = 'https://orrerium.web.app';
 const STATUS_URL = 'https://api.robco.studio/public/virtual-robot/status';
+const SESSION_BASE = 'https://api.robco.studio/public/virtual-robot/session';
+const sessionUrlFor = (sid) => `${SESSION_BASE}/${sid}/`;
 
 const el = (id) => document.getElementById(id);
 const sidValue = el('sidValue');
@@ -113,6 +115,11 @@ openBtn.addEventListener('click', async () => {
         openBtn.disabled = false;
         return;
     }
+    // Copy the fresh RobFlow session URL, then launch. Write (awaited) before opening the tab —
+    // which steals focus — and before window.close(), so the clipboard write completes.
+    const sessionUrl = sessionUrlFor(sid);
+    try { await navigator.clipboard.writeText(sessionUrl); } catch { /* best-effort */ }
+    chrome.storage.local.set({ robflowSessionUrl: sessionUrl }); // keep the stored URL fresh
     chrome.tabs.create({ url: buildViewerUrl(sid) });
     window.close();
 });
