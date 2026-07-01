@@ -15,12 +15,12 @@
 const API_MATCH = 'https://api.robco.studio/*';
 const STUDIO_ORIGIN = 'https://robco.studio';
 
-/** Decode a JWT payload (no verification) → { email, exp }. Best-effort; null on garbage. */
+/** Decode a JWT payload (no verification) → { email, exp, tokenUse }. Best-effort; null on garbage. */
 function decodeJwt(token) {
     try {
         const part = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
         const payload = JSON.parse(atob(part));
-        return { email: payload.email || null, exp: payload.exp || null };
+        return { email: payload.email || null, exp: payload.exp || null, tokenUse: payload.token_use || null };
     } catch {
         return null;
     }
@@ -31,9 +31,16 @@ function captureToken(token) {
     if (!token || !token.startsWith('ey')) return;
     const info = decodeJwt(token);
     if (!info || !info.exp || info.exp * 1000 <= Date.now()) return; // reject invalid/expired
+    // ONLY the Cognito *id* token authorizes the account API (…/public/virtual-robot/status +
+    // configure). The session 'editor' token (sub:editor) and any access token also ride
+    // api.robco.studio on session-API calls and would otherwise overwrite the id token here
+    // (freshest-expiry wins) — capturing the wrong credential. Cognito id tokens carry token_use:'id'.
+    if (info.tokenUse !== 'id') return;
     chrome.storage.local.get(['robflowToken'], ({ robflowToken }) => {
         const prev = robflowToken && robflowToken.value ? decodeJwt(robflowToken.value) : null;
-        if (prev && prev.exp >= info.exp) return; // keep the later-expiring one
+        // Among id tokens keep the later-expiring one; but always replace a non-id token left by a
+        // pre-fix build (else a stale editor token with a later expiry would block a fresh id token).
+        if (prev && prev.tokenUse === 'id' && prev.exp >= info.exp) return;
         chrome.storage.local.set({
             robflowToken: { value: token, email: info.email, exp: info.exp, capturedAt: Date.now() },
         });
@@ -63,10 +70,11 @@ chrome.runtime.onMessage.addListener((msg, sender) => {
     return false; // fire-and-forget; no response expected
 });
 
-// Drop an already-expired token on worker startup so the popup never offers a stale credential.
+// On worker startup drop a stored credential that's expired OR not a Cognito id token (flushes a
+// pre-fix editor token) so the popup never offers a stale or wrong-scope credential.
 chrome.storage.local.get(['robflowToken'], ({ robflowToken }) => {
     const info = robflowToken && robflowToken.value ? decodeJwt(robflowToken.value) : null;
-    if (robflowToken && (!info || !info.exp || info.exp * 1000 <= Date.now())) {
+    if (robflowToken && (!info || !info.exp || info.exp * 1000 <= Date.now() || info.tokenUse !== 'id')) {
         chrome.storage.local.remove('robflowToken');
     }
 });
