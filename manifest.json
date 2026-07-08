@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RobFlow Session Clipper",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Auto-captures the RobFlow session + Cognito token and opens the viewer with one click (no DevTools copy).",
   "action": {
     "default_popup": "popup.html",
