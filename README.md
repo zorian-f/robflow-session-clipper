@@ -12,6 +12,7 @@ no page refresh after signing in.
 | Cognito id token (control) | ❌ manual DevTools copy | ✅ after a tab refresh | ✅ right after sign-in, no refresh |
 | Launch the viewer | ❌ paste into the dialog | ✅ token in the URL | ✅ viewer pulls the token itself |
 | Token renewals reach the viewer | ❌ | ❌ | ✅ pushed to open viewer tabs |
+| Control past the 1 h token lifetime | ❌ | ❌ | ✅ renewed automatically, even with Studio closed |
 
 The session URL alone gives a **view-only** link. The Cognito id token is what unlocks
 **control**: moving the robot, pushing/saving flows and reconfiguring modules.
@@ -24,16 +25,18 @@ RobCo Studio keeps its login with `axios-jwt`: `{ accessToken, refreshToken }` a
 session view with its SPA router, so there is no page load to hook. That is why v2 needed a
 refresh.
 
-- **`content.js`** runs on every `robco.studio` page. Every 2 s it reads the stored id token and
-  the session iframe's SID, which catches the sign-in, Studio's own token renewals and session
-  changes. It injects an *Open in viewer* button on the session page. It never reads the refresh
-  token.
+- **`content.js`** runs on every `robco.studio` page. Every 2 s it reads Studio's stored tokens and
+  the session iframe's SID, which catches the sign-in, Studio's own token renewals, session changes
+  and sign-out. It passes the tokens to the background worker only, and injects an *Open in
+  viewer* button on the session page.
 - **`background.js`** (service worker) stores the freshest id token. Its sources are the content
   script, passive observation of `api.robco.studio` request headers (only from requests robco.studio
   itself initiates, so no other site can plant a token), and an on-demand read from any
-  open Studio tab when a viewer asks and the stored token is stale. On install or reload it
-  re-injects `content.js` into already-open Studio tabs. It derives the current SID from
-  `/virtual-robot/status`.
+  open Studio tab when a viewer asks and the stored token is stale. If nothing fresher is
+  available, it renews the id token itself through Studio's own endpoint
+  (`POST /public/login/refresh-token`), so a connected viewer stays in control past the hour. On
+  install or reload it re-injects its scripts into already-open tabs. It derives the current SID
+  from `/virtual-robot/status`.
 - **`bridge.js`** runs on the viewer's origins: `orrerium.web.app`, `orrerium-develop.web.app`,
   the per-branch preview channels CI deploys (`orrerium--feat-<branch>-<hash>.web.app`), and `localhost`/`127.0.0.1` on the viewer's own ports only (3000 for
   `pnpm dev`, 4173 for `vite preview`), so another local server never gets the token. It marks the page with
@@ -71,9 +74,19 @@ refresh.
 
 ## Notes & limitations
 
-- The id token lasts about 1 hour. Studio renews it only while you use Studio, and every renewal
-  reaches open viewer tabs within a few seconds. If Studio sits idle past the hour, the viewer keeps
-  its live socket, but a reload falls back to view-only until Studio is used again.
+- The id token lasts about 1 hour. When less than 6 minutes are left and a viewer asks (open viewers
+  ask 5 minutes before expiry), the extension renews it with Studio's refresh token. Studio doesn't
+  need to be open or used. Every renewal reaches open viewer tabs within seconds.
+- **The refresh token** is held only in the worker's `chrome.storage.session`: memory-only (gone on
+  a browser restart, after which one visit to robco.studio restores it) and unreadable by content
+  scripts, pages and the viewer. It is only ever sent to RobCo's refresh endpoint. Signing out of
+  Studio, or the endpoint rejecting it, clears it. RobCo returns the same refresh token on renewal
+  (measured 2026-10-12), so renewing never signs Studio out. Should that change, the new pair is
+  written back into open Studio tabs.
+- Signing out of Studio doesn't revoke the refresh token on RobCo's side (Studio doesn't either).
+  The extension stops using it once it sees the sign-out in an open Studio tab. A sign-out on
+  another device isn't seen, so the extension keeps renewing until the browser closes or RobCo
+  rejects the token.
 - Only bridged viewer URLs get the token without it appearing in the URL. A custom viewer URL set
   in the popup falls back to `?robco=session&sid=…&token=…`.
 - This automates an existing same-browser login. It is **not** a replacement login, and it still

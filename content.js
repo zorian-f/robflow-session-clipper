@@ -13,7 +13,8 @@
 
     const SESSION_PATTERN = /^https:\/\/api\.robco\.studio\/public\/virtual-robot\/session\/[^"'\s/]+/;
     // Studio uses axios-jwt: { accessToken, refreshToken } as JSON under this key. The accessToken
-    // is the Cognito id token. We only ever read accessToken.
+    // is the Cognito id token. The refresh token goes to the background worker only (it renews the
+    // id token when Studio is idle or closed) and never to a page.
     const STUDIO_TOKENS_KEY = 'auth-tokens-production';
     // Cheap (one localStorage read + one querySelector) and catches the login, token renewals and
     // session changes within a couple of seconds. The storage event can't be used: it never fires
@@ -24,24 +25,47 @@
     let lastSessionUrl = null;
 
     // --- Token (Studio's own localStorage) -----------------------------------------------------
-    function readStudioToken() {
+    /** { accessToken, refreshToken } when signed in, null when signed out, undefined when unreadable. */
+    function readStudioTokens() {
+        let raw;
         try {
-            const tokens = JSON.parse(localStorage.getItem(STUDIO_TOKENS_KEY) || 'null');
-            return tokens && typeof tokens.accessToken === 'string' ? tokens.accessToken : null;
+            raw = localStorage.getItem(STUDIO_TOKENS_KEY);
         } catch {
-            return null; // storage blocked or not JSON
+            return undefined; // storage blocked: says nothing about the login
+        }
+        if (raw === null) return null; // axios-jwt removes the key on sign-out
+        try {
+            const t = JSON.parse(raw);
+            return t && typeof t.accessToken === 'string'
+                ? { accessToken: t.accessToken, refreshToken: typeof t.refreshToken === 'string' ? t.refreshToken : null }
+                : undefined;
+        } catch {
+            return undefined;
         }
     }
 
     let sending = false;
+    let signedOutSent = false;
     function pollToken() {
-        const token = readStudioToken();
-        if (!token || token === lastToken || sending) return;
+        const tokens = readStudioTokens();
+        if (tokens === undefined || sending) return;
+        if (tokens === null) {
+            // Signed out of Studio (in any tab: localStorage is shared): stop the extension renewing.
+            if (signedOutSent) return;
+            sending = true;
+            chrome.runtime.sendMessage({ type: 'studio-signed-out' }, () => {
+                sending = false;
+                if (!chrome.runtime.lastError) { signedOutSent = true; lastToken = null; }
+            });
+            return;
+        }
+        signedOutSent = false;
+        if (tokens.accessToken === lastToken) return;
         sending = true;
         // Only mark it sent once the worker took it (it may be starting up); else retry next tick.
-        chrome.runtime.sendMessage({ type: 'capture-token', token }, () => {
+        chrome.runtime.sendMessage({ type: 'capture-token', token: tokens.accessToken, refreshToken: tokens.refreshToken }, () => {
             sending = false;
-            if (!chrome.runtime.lastError) lastToken = token;
+            if (!chrome.runtime.lastError) lastToken = tokens.accessToken;
         });
     }
 

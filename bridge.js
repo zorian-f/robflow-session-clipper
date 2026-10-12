@@ -10,7 +10,7 @@
  *   page → ext  { source: 'orrerium', type: 'clipper:request', id }
  *   ext → page  { source: 'robflow-clipper', type: 'session', id, sid, token, email, exp, reason }
  *   ext → page  { source: 'robflow-clipper', type: 'token', token, email, exp }   (push on renewal)
- * Only the short-lived Cognito id token ever crosses; the extension never holds a refresh token.
+ * Only the short-lived Cognito id token ever crosses; Studio's refresh token stays in the worker.
  */
 (() => {
     // Keep in sync with background.js isBridgedUrl(). Local dev only on the viewer's own ports.

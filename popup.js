@@ -1,7 +1,7 @@
 const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
 const SESSION_BASE = 'https://api.robco.studio/public/virtual-robot/session';
 const sessionUrlFor = (sid) => `${SESSION_BASE}/${sid}/`;
-const SOURCE_LABEL = { 'studio-storage': 'Studio tab', 'studio-tab': 'Studio tab', header: 'API traffic' };
+const SOURCE_LABEL = { 'studio-storage': 'Studio tab', 'studio-tab': 'Studio tab', header: 'API traffic', renewed: 'auto-renewal' };
 
 const el = (id) => document.getElementById(id);
 const sidValue = el('sidValue');

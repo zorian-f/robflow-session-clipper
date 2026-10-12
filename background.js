@@ -16,18 +16,28 @@
  *   2. webRequest.onBeforeSendHeaders on api.robco.studio — passive backup (observe only).
  *   3. On demand (a viewer or the popup asks while our copy is stale): read the entry straight
  *      from any open Studio tab via chrome.scripting.
+ *   4. Renewal, when 1-3 have nothing fresher: POST /public/login/refresh-token with Studio's
+ *      refresh token, exactly as Studio's own axios-jwt interceptor does (RobCo's backend holds the
+ *      Cognito client secret; the call needs none). A connected viewer so stays in control past
+ *      the 1 h id-token lifetime, even with no Studio tab open.
  *
- * Only the id token is ever stored or handed out; Studio's refresh token is never read.
+ * Only the id token is ever handed out. The refresh token stays in this worker's storage.session
+ * (memory-only, closed to content scripts and pages) and is only ever sent to the refresh endpoint.
+ * Studio signing out clears it. Measured 2026-10-12: RobCo echoes the SAME refresh token on renewal
+ * (no rotation), so renewing here never invalidates Studio's copy; should rotation ever appear, the
+ * new pair is written back into open Studio tabs so Studio stays signed in.
  */
 const API_MATCH = 'https://api.robco.studio/*';
 const STUDIO_ORIGIN = 'https://robco.studio';
 const STATUS_URL = 'https://api.robco.studio/public/virtual-robot/status';
+const REFRESH_URL = 'https://api.robco.studio/public/login/refresh-token';
 const SESSION_BASE = 'https://api.robco.studio/public/virtual-robot/session';
 const STUDIO_TOKENS_KEY = 'auth-tokens-production';
 const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
 const DEFAULT_VIEWER = 'https://orrerium.web.app';
-// A token with less than this left is "stale": worth a look in the Studio tab for a newer one.
-const FRESH_MARGIN_MS = 2 * 60 * 1000;
+// A token with less than this left is "stale": look for a newer one, else renew. Just over the
+// viewer's 5 min keep-alive lead, so its first ask already gets a renewal.
+const FRESH_MARGIN_MS = 6 * 60 * 1000;
 
 // Viewer origins the bridge serves: prod + develop sites, the per-branch preview channels CI
 // deploys on the prod site (`orrerium--feat-<branch>-<8-char hash>.web.app`, see the viewer's
@@ -41,6 +51,8 @@ const VIEWER_MATCHES = [ // = bridge.js's manifest matches
     ...VIEWER_LOCAL_PORTS.flatMap((p) => [`http://localhost:${p}/*`, `http://127.0.0.1:${p}/*`]),
 ];
 const STATUS_TIMEOUT_MS = 4000;
+const RENEW_TIMEOUT_MS = 6000;
+const RENEW_COOLDOWN_MS = 30 * 1000; // after a failed renewal, before trying again
 const TAB_READ_TIMEOUT_MS = 1500;
 
 /** Decode a JWT payload (no verification) → { email, exp, tokenUse }. Best-effort; null on garbage. */
@@ -88,34 +100,129 @@ async function storeIfFresher(token, source) {
     return true;
 }
 
-// Runs inside a Studio tab (serialized by chrome.scripting — must stay self-contained).
-function readStudioAccessToken(key) {
+// --- Refresh token: memory-only, worker-only -------------------------------------------------
+// Bumped whenever the login held here changes or ends, so a renewal that was in flight across a
+// sign-out or account switch can't write the old login back when it returns.
+let loginEpoch = 0;
+
+async function storeRefreshToken(value) {
+    if (typeof value !== 'string' || !value) return;
+    const s = await chrome.storage.session.get(['robflowRefresh', 'robflowRejected']);
+    // Unchanged, or one RobCo already rejected (an open Studio tab still holds it): skip.
+    if (value === s.robflowRefresh || value === s.robflowRejected) return;
+    loginEpoch++;
+    await chrome.storage.session.set({ robflowRefresh: value });
+}
+const loadRefreshToken = async () => (await chrome.storage.session.get('robflowRefresh')).robflowRefresh || null;
+
+/** Studio signed out: forget everything so nothing keeps renewing a session the user ended. */
+async function forgetLogin() {
+    loginEpoch++;
+    await chrome.storage.session.remove('robflowRefresh');
+    await chrome.storage.local.remove('robflowToken');
+}
+
+// Run inside a Studio tab (serialized by chrome.scripting — must stay self-contained). Each one
+// re-checks the origin: the tab may have navigated away between the query and the injection.
+function readStudioTokens(key) {
+    if (location.origin !== 'https://robco.studio') return null;
     try {
-        const tokens = JSON.parse(localStorage.getItem(key) || 'null');
-        return tokens && typeof tokens.accessToken === 'string' ? tokens.accessToken : null;
+        const t = JSON.parse(localStorage.getItem(key) || 'null');
+        return t && typeof t.accessToken === 'string'
+            ? { accessToken: t.accessToken, refreshToken: typeof t.refreshToken === 'string' ? t.refreshToken : null }
+            : null;
     } catch {
         return null;
+    }
+}
+function writeStudioTokens(key, oldRefresh, accessToken, refreshToken) {
+    if (location.origin !== 'https://robco.studio') return;
+    try {
+        // Only a tab still on the login we renewed: never clobber a different/newer sign-in.
+        const t = JSON.parse(localStorage.getItem(key) || 'null');
+        if (t && t.refreshToken === oldRefresh) localStorage.setItem(key, JSON.stringify({ accessToken, refreshToken }));
+    } catch {
+        /* leave Studio as it is */
     }
 }
 
 const studioTabs = () => chrome.tabs.query({ url: `${STUDIO_ORIGIN}/*` });
 
-/** Source 3: pull the current token out of every open Studio tab (discarded/loading tabs are skipped). */
-async function readOpenStudioTabs() {
+/** Run `func(...args)` in every open Studio tab; a loading/discarded tab is skipped, never waited on. */
+async function inStudioTabs(func, args) {
     const tabs = await studioTabs();
-    await Promise.all(tabs.map(async (tab) => {
+    return Promise.all(tabs.map(async (tab) => {
         try {
-            const read = chrome.scripting.executeScript({
-                target: { tabId: tab.id }, func: readStudioAccessToken, args: [STUDIO_TOKENS_KEY],
-            });
-            // A tab that is still loading can hold executeScript; never let it stall the viewer.
+            const run = chrome.scripting.executeScript({ target: { tabId: tab.id }, func, args });
             const timeout = new Promise((resolve) => setTimeout(() => resolve([]), TAB_READ_TIMEOUT_MS));
-            const [res] = await Promise.race([read, timeout]);
-            if (res && res.result) await captureToken(res.result, 'studio-tab');
+            const [res] = await Promise.race([run, timeout]);
+            return res ? res.result : null;
         } catch {
-            /* tab not scriptable right now */
+            return null; // tab not scriptable right now
         }
     }));
+}
+
+/** Source 3: pull the current tokens out of every open Studio tab. */
+async function readOpenStudioTabs() {
+    for (const t of await inStudioTabs(readStudioTokens, [STUDIO_TOKENS_KEY])) {
+        if (!t) continue;
+        await captureToken(t.accessToken, 'studio-tab');
+        await storeRefreshToken(t.refreshToken);
+    }
+}
+
+// --- Source 4: renewal -------------------------------------------------------------------------
+let renewing = null;
+let lastRenewFailAt = 0;
+
+/** Renew the id token with the stored refresh token: one request in flight, 30 s apart after a failure. */
+function renewIdToken() {
+    renewing = renewing || doRenew().finally(() => { renewing = null; });
+    return renewing;
+}
+
+async function doRenew() {
+    if (Date.now() - lastRenewFailAt < RENEW_COOLDOWN_MS) return false;
+    const refreshToken = await loadRefreshToken();
+    if (!refreshToken) return false;
+    const ok = await renewWith(refreshToken, loginEpoch);
+    if (!ok) lastRenewFailAt = Date.now();
+    return ok;
+}
+
+async function renewWith(refreshToken, epoch) {
+    let res;
+    try {
+        res = await fetch(REFRESH_URL, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ refresh_token: refreshToken }), signal: AbortSignal.timeout(RENEW_TIMEOUT_MS),
+        });
+    } catch {
+        return false; // offline or timed out: keep the refresh token, retry after the cooldown
+    }
+    // Revoked or expired: drop it and remember it, so an open Studio tab still holding it doesn't
+    // hand it back. The current id token stays usable until its own expiry; a new sign-in at
+    // robco.studio brings a new refresh token. (429/408 and 5xx are transient: keep it.)
+    if (res.status === 400 || res.status === 401 || res.status === 403) {
+        if (epoch === loginEpoch) {
+            await chrome.storage.session.set({ robflowRejected: refreshToken });
+            await chrome.storage.session.remove('robflowRefresh');
+        }
+        return false;
+    }
+    if (!res.ok) return false;
+    const data = await res.json().catch(() => null);
+    if (!data || typeof data.access_token !== 'string') return false;
+    // A sign-out or another login arrived while the request was out: its result is stale.
+    if (epoch !== loginEpoch) return false;
+    if (typeof data.refresh_token === 'string' && data.refresh_token && data.refresh_token !== refreshToken) {
+        // Rotation: the old refresh token, Studio's copy included, is dead now. Keep open Studio
+        // tabs in step so Studio doesn't sign out on its next renewal.
+        await storeRefreshToken(data.refresh_token);
+        await inStudioTabs(writeStudioTokens, [STUDIO_TOKENS_KEY, refreshToken, data.access_token, data.refresh_token]);
+    }
+    return captureToken(data.access_token, 'renewed');
 }
 
 /** The account's CURRENT session SID (the page-detected one goes stale when the session re-provisions). */
@@ -133,11 +240,14 @@ async function fetchSid(token) {
  * @returns {Promise<{sid: string|null, token: string|null, email?: string, exp?: number, reason?: string}>}
  */
 async function getSession() {
-    let { robflowToken: rec } = await chrome.storage.local.get('robflowToken');
-    if (!liveFor(rec && rec.value ? decodeJwt(rec.value) : null, FRESH_MARGIN_MS)) {
+    const stored = async () => (await chrome.storage.local.get('robflowToken')).robflowToken;
+    const fresh = (r) => liveFor(r && r.value ? decodeJwt(r.value) : null, FRESH_MARGIN_MS);
+    let rec = await stored();
+    if (!fresh(rec)) {
         await readOpenStudioTabs(); // Studio may have renewed it since we last looked
-        ({ robflowToken: rec } = await chrome.storage.local.get('robflowToken'));
+        rec = await stored();
     }
+    if (!fresh(rec) && await renewIdToken()) rec = await stored();
     const { robflowSessionUrl } = await chrome.storage.local.get('robflowSessionUrl');
     const pageSid = ((robflowSessionUrl || '').match(SID_RE) || [])[1] || null;
     const info = rec && rec.value ? decodeJwt(rec.value) : null;
@@ -214,7 +324,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // Source 1: our Studio content script's localStorage read.
     if (msg.type === 'capture-token' && isStudioSender(sender)) {
         captureToken(msg.token, 'studio-storage');
+        storeRefreshToken(msg.refreshToken);
         sendResponse({ ok: true }); // ack receipt so content.js stops resending this token
+        return false;
+    }
+    // Studio's tokens are gone (sign-out, or Studio's own 401 handling): stop renewing a session
+    // the user ended.
+    if (msg.type === 'studio-signed-out' && isStudioSender(sender)) {
+        forgetLogin();
+        sendResponse({ ok: true });
         return false;
     }
     // A viewer bridge or the popup wants the session. Never answer anyone else.
