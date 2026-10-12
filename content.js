@@ -1,90 +1,98 @@
 (() => {
+    // Runs on EVERY robco.studio page (not just /cloud-robflow): after the Google redirect Studio
+    // routes from /login to the session view with the SPA router — no page load — so a script
+    // scoped to /cloud-robflow was never injected until a manual refresh.
+    //
+    // Re-injection guard: after an extension install/reload the background injects this file into
+    // already-open Studio tabs. The orphaned previous copy notices it was superseded (or that its
+    // extension context is gone) on its next tick and stops.
+    const me = {};
+    const INSTANCE = Math.random().toString(36).slice(2);
+    window.__robflowClipper = me;
+    const alive = () => window.__robflowClipper === me && !!(chrome.runtime && chrome.runtime.id);
+
     const SESSION_PATTERN = /^https:\/\/api\.robco\.studio\/public\/virtual-robot\/session\/[^"'\s/]+/;
-    const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
-    const DEFAULT_VIEWER = 'https://orrerium.web.app';
-    // Amplify/Cognito keys the stored token by APP CLIENT id (not the pool id) — scope to RobCo's
-    // client so we never pick up some other Cognito app's token that shares this origin.
-    const COGNITO_CLIENT = '4gntu4bg8bim49i7edsjg981bq';
-    const ID_TOKEN_KEY = new RegExp(`^CognitoIdentityServiceProvider\\.${COGNITO_CLIENT}\\..+\\.idToken$`);
+    // Studio uses axios-jwt: { accessToken, refreshToken } as JSON under this key. The accessToken
+    // is the Cognito id token. The refresh token goes to the background worker only (it renews the
+    // id token when Studio is idle or closed) and never to a page.
+    const STUDIO_TOKENS_KEY = 'auth-tokens-production';
+    // Cheap (one localStorage read + one querySelector) and catches the login, token renewals and
+    // session changes within a couple of seconds. The storage event can't be used: it never fires
+    // for writes made by the same document.
+    const POLL_MS = 2000;
 
-    let detectedSid = false;
+    let lastToken = null;
     let lastSessionUrl = null;
-    let lastCaptureAt = 0;
 
-    // --- SID detection (the session iframe) ----------------------------------------------------
-    function tryDetectSid() {
-        if (detectedSid) return true;
+    // --- Token (Studio's own localStorage) -----------------------------------------------------
+    /** { accessToken, refreshToken } when signed in, null when signed out, undefined when unreadable. */
+    function readStudioTokens() {
+        let raw;
+        try {
+            raw = localStorage.getItem(STUDIO_TOKENS_KEY);
+        } catch {
+            return undefined; // storage blocked: says nothing about the login
+        }
+        if (raw === null) return null; // axios-jwt removes the key on sign-out
+        try {
+            const t = JSON.parse(raw);
+            return t && typeof t.accessToken === 'string'
+                ? { accessToken: t.accessToken, refreshToken: typeof t.refreshToken === 'string' ? t.refreshToken : null }
+                : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+
+    let sending = false;
+    let signedOutSent = false;
+    function pollToken() {
+        const tokens = readStudioTokens();
+        if (tokens === undefined || sending) return;
+        if (tokens === null) {
+            // Signed out of Studio (in any tab: localStorage is shared): stop the extension renewing.
+            if (signedOutSent) return;
+            sending = true;
+            chrome.runtime.sendMessage({ type: 'studio-signed-out' }, () => {
+                sending = false;
+                if (!chrome.runtime.lastError) { signedOutSent = true; lastToken = null; }
+            });
+            return;
+        }
+        signedOutSent = false;
+        if (tokens.accessToken === lastToken) return;
+        sending = true;
+        // Only mark it sent once the worker took it (it may be starting up); else retry next tick.
+        chrome.runtime.sendMessage({ type: 'capture-token', token: tokens.accessToken, refreshToken: tokens.refreshToken }, () => {
+            sending = false;
+            if (!chrome.runtime.lastError) lastToken = tokens.accessToken;
+        });
+    }
+
+    // --- SID (the session iframe; follows a new session in the same tab) -----------------------
+    function pollSession() {
         const iframe = document.querySelector('iframe[src*="api.robco.studio/public/virtual-robot/session/"]');
-        if (!iframe) return false;
-        const match = iframe.src.match(SESSION_PATTERN);
-        if (!match) return false;
-
-        detectedSid = true;
-        const cleanUrl = match[0].replace(/\/$/, '') + '/';
-        lastSessionUrl = cleanUrl;
-        chrome.storage.local.set({ robflowSessionUrl: cleanUrl });
-        showToast('RobFlow session captured — open the popup to launch the viewer.', true);
-        ensureLaunchButton();
-        return true;
+        const match = iframe && iframe.src.match(SESSION_PATTERN);
+        setLaunchButton(!!match);
+        if (!match) return;
+        const url = match[0].replace(/\/$/, '') + '/';
+        if (url === lastSessionUrl) return;
+        const first = lastSessionUrl === null;
+        lastSessionUrl = url;
+        chrome.storage.local.set({ robflowSessionUrl: url });
+        showToast(first ? 'RobFlow session captured. Open it in the viewer from here or the popup.'
+                        : 'New RobFlow session captured.', true);
     }
 
-    // --- Token detection (Cognito id token in page localStorage) -------------------------------
-    // A no-network, on-demand source that complements the background webRequest capture. The
-    // content script shares robco.studio's origin, so it can read Amplify/Cognito's stored token.
-    function readTokenFromStorage() {
-        try {
-            for (let i = 0; i < localStorage.length; i++) {
-                const k = localStorage.key(i);
-                if (k && ID_TOKEN_KEY.test(k)) return localStorage.getItem(k);
-            }
-        } catch {
-            /* storage blocked */
-        }
-        return null;
-    }
-
-    // Minimal JWT decode (no verification) — just enough to gate on expiry + token_use.
-    function decodeJwtLite(token) {
-        try {
-            const p = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-            return { exp: p.exp || 0, use: p.token_use || null };
-        } catch {
-            return null;
-        }
-    }
-
-    // The freshest LIVE Cognito id token straight from the page, or null. Content scripts share
-    // robco.studio's origin, so this bypasses the focus-throttled / background-cached copy and hands
-    // the launch the most current credential.
-    function liveIdTokenFromPage() {
-        const t = readTokenFromStorage();
-        if (!t) return null;
-        const d = decodeJwtLite(t);
-        if (!d || d.use !== 'id' || d.exp * 1000 <= Date.now()) return null;
-        return t;
-    }
-
-    function captureStorageToken() {
-        if (Date.now() - lastCaptureAt < 60000) return; // throttle refocus spam
-        const token = readTokenFromStorage();
-        if (token) {
-            lastCaptureAt = Date.now();
-            chrome.runtime.sendMessage({ type: 'capture-token', token });
-        }
-    }
-
-    // --- One-click "Open in viewer" injected onto the Studio page ------------------------------
-    function buildViewerUrl(base, sid, token) {
-        const root = (base || DEFAULT_VIEWER).replace(/[?#].*$/, '').replace(/\/+$/, '');
-        const q = new URLSearchParams({ robco: 'session', sid });
-        if (token) q.set('token', token);
-        return `${root}/?${q.toString()}`;
-    }
-
-    function ensureLaunchButton() {
-        if (document.getElementById('__robflow_launch')) return;
-        const btn = document.createElement('button');
+    // --- One-click "Open in viewer" on the session page ----------------------------------------
+    function setLaunchButton(show) {
+        let btn = document.getElementById('__robflow_launch');
+        if (!show) { if (btn) btn.remove(); return; }
+        if (btn && btn.dataset.owner === INSTANCE) return;
+        if (btn) btn.remove(); // a superseded copy's button, its click handler is dead
+        btn = document.createElement('button');
         btn.id = '__robflow_launch';
+        btn.dataset.owner = INSTANCE;
         btn.textContent = '▶ Open in viewer';
         Object.assign(btn.style, {
             position: 'fixed', bottom: '24px', right: '24px', zIndex: '2147483647',
@@ -93,35 +101,33 @@
             fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
             boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
         });
-        btn.addEventListener('click', () => {
-            if (!lastSessionUrl) { showToast('No session detected yet.', false); return; }
-            const sid = (lastSessionUrl.match(SID_RE) || [])[1];
-            if (!sid) { showToast('Malformed session URL — reload the session tab.', false); return; }
-            // Read the freshest live id token straight from the page and hand it to the background so
-            // its stored copy (the popup's source) stays current too — this way the handoff carries
-            // BOTH the session and a live control token whenever the user is signed in.
-            const pageToken = liveIdTokenFromPage();
-            if (pageToken) chrome.runtime.sendMessage({ type: 'capture-token', token: pageToken });
-            // Fire the clipboard write synchronously inside the click gesture (best chance of success
-            // in the page context), then report the REAL result rather than assuming it copied —
-            // a page Permissions-Policy or lost focus can still reject it.
-            let copied;
-            try {
-                copied = navigator.clipboard.writeText(lastSessionUrl).then(() => true, () => false);
-            } catch {
-                copied = Promise.resolve(false);
-            }
-            chrome.storage.local.get(['robflowToken', 'viewerBaseUrl'], (s) => {
-                const stored = s.robflowToken && s.robflowToken.exp * 1000 > Date.now() ? s.robflowToken.value : null;
-                const token = pageToken || stored; // prefer the just-read page token
-                const mode = token ? 'control' : 'view-only';
-                window.open(buildViewerUrl(s.viewerBaseUrl, sid, token), '_blank', 'noopener');
-                copied.then((ok) => showToast(
-                    ok ? `Session URL copied — opened viewer (${mode}).`
-                       : `Opened viewer (${mode}) — clipboard copy was blocked.`, ok));
-            });
-        });
+        btn.addEventListener('click', onLaunch);
         document.body.appendChild(btn);
+    }
+
+    function onLaunch() {
+        if (!alive()) { showToast('The clipper was reloaded. Refresh this tab once.', false); return; }
+        // Clipboard write fires synchronously inside the click gesture (best chance in the page
+        // context); report the REAL result — a Permissions-Policy or lost focus can still reject it.
+        let copied;
+        try {
+            copied = lastSessionUrl
+                ? navigator.clipboard.writeText(lastSessionUrl).then(() => true, () => false)
+                : Promise.resolve(false);
+        } catch {
+            copied = Promise.resolve(false);
+        }
+        // The background opens the tab (no popup blocker) with a freshly derived SID.
+        chrome.runtime.sendMessage({ type: 'open-viewer' }, (res) => {
+            if (chrome.runtime.lastError || !res || !res.ok) {
+                showToast((res && res.reason) || 'Could not open the viewer.', false);
+                return;
+            }
+            const mode = res.control ? 'control' : 'view-only';
+            copied.then((ok) => showToast(
+                ok ? `Session URL copied. Opened viewer (${mode}).`
+                   : `Opened viewer (${mode}). Clipboard copy was blocked.`, ok));
+        });
     }
 
     function showToast(message, success) {
@@ -144,16 +150,14 @@
         setTimeout(() => { toast.remove(); }, 3500);
     }
 
-    // Capture the token now and whenever the tab regains focus (it rotates ~hourly).
-    captureStorageToken();
-    window.addEventListener('focus', captureStorageToken);
-
-    // Detect the SID immediately, then watch for Vue rendering the iframe in late.
-    if (!tryDetectSid()) {
-        const observer = new MutationObserver(() => {
-            if (tryDetectSid()) observer.disconnect();
-        });
-        observer.observe(document.body, { childList: true, subtree: true });
-        setTimeout(() => observer.disconnect(), 60000);
+    function tick() {
+        if (!alive()) { clearInterval(timer); return; }
+        // Isolated so a DOM hiccup in one can't stop the other; a throw from an invalidated
+        // extension context is caught here and ends the loop via alive() on the next tick.
+        try { pollToken(); } catch { sending = false; }
+        try { pollSession(); } catch { /* retried next tick */ }
     }
+
+    const timer = setInterval(tick, POLL_MS);
+    tick();
 })();
