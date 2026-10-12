@@ -13,13 +13,17 @@
  *
  * Sources feeding captureToken(), freshest expiry wins:
  *   1. content.js on every robco.studio page polls that localStorage entry ('capture-token').
- *   2. webRequest.onBeforeSendHeaders on api.robco.studio — passive backup (observe only).
- *   3. On demand (a viewer or the popup asks while our copy is stale): read the entry straight
+ *   2. On demand (a viewer or the popup asks while our copy is stale): read the entry straight
  *      from any open Studio tab via chrome.scripting.
- *   4. Renewal, when 1-3 have nothing fresher: POST /public/login/refresh-token with Studio's
+ *   3. Renewal, when 1-2 have nothing fresher: POST /public/login/refresh-token with Studio's
  *      refresh token, exactly as Studio's own axios-jwt interceptor does (RobCo's backend holds the
  *      Cognito client secret; the call needs none). A connected viewer so stays in control past
  *      the 1 h id-token lifetime, even with no Studio tab open.
+ * (v2-era request-header observation is gone: it woke this worker on every api.robco.studio
+ * request and only duplicated source 1.)
+ *
+ * Consumers: the viewer bridge (bridge.js, pull + push) and the RobCo Visual Components add-on
+ * (desktop.js, native messaging).
  *
  * Only the id token is ever handed out. The refresh token stays in this worker's storage.session
  * (memory-only, closed to content scripts and pages) and is only ever sent to the refresh endpoint.
@@ -27,7 +31,6 @@
  * (no rotation), so renewing here never invalidates Studio's copy; should rotation ever appear, the
  * new pair is written back into open Studio tabs so Studio stays signed in.
  */
-const API_MATCH = 'https://api.robco.studio/*';
 const STUDIO_ORIGIN = 'https://robco.studio';
 const STATUS_URL = 'https://api.robco.studio/public/virtual-robot/status';
 const REFRESH_URL = 'https://api.robco.studio/public/login/refresh-token';
@@ -68,8 +71,8 @@ function decodeJwt(token) {
 
 const liveFor = (info, marginMs = 0) => !!(info && info.exp && info.exp * 1000 > Date.now() + marginMs);
 
-// Captures are serialized: the content script, the header observer and a Studio-tab read can all
-// fire within milliseconds of a renewal, and an unserialized read-modify-write could let an older
+// Captures are serialized: the content script, a Studio-tab read and a renewal can all fire
+// within milliseconds of each other, and an unserialized read-modify-write could let an older
 // token's write land last.
 let captureQueue = Promise.resolve();
 
@@ -97,6 +100,7 @@ async function storeIfFresher(token, source) {
     await chrome.storage.local.set({
         robflowToken: { value: token, email: info.email, exp: info.exp, capturedAt: Date.now(), source },
     });
+    syncDesktop(); // desktop.js: hand the new token to the VC add-on (no-op without its helper)
     return true;
 }
 
@@ -107,19 +111,25 @@ let loginEpoch = 0;
 
 async function storeRefreshToken(value) {
     if (typeof value !== 'string' || !value) return;
-    const s = await chrome.storage.session.get(['robflowRefresh', 'robflowRejected']);
-    // Unchanged, or one RobCo already rejected (an open Studio tab still holds it): skip.
-    if (value === s.robflowRefresh || value === s.robflowRejected) return;
+    const s = await chrome.storage.session.get(['robflowRefresh', 'robflowRejected', 'robflowRetired']);
+    // Unchanged, one RobCo already rejected, or one a rotation retired (a Studio-tab read taken just
+    // before the write-back can still carry it): skip.
+    if (value === s.robflowRefresh || value === s.robflowRejected || value === s.robflowRetired) return;
     loginEpoch++;
     await chrome.storage.session.set({ robflowRefresh: value });
+    // A (re)gained refresh token - e.g. the first Studio visit after a browser restart - means the
+    // desktop side can be kept fresh again: re-sync it and re-arm its renewal alarm.
+    syncDesktop();
 }
 const loadRefreshToken = async () => (await chrome.storage.session.get('robflowRefresh')).robflowRefresh || null;
 
 /** Studio signed out: forget everything so nothing keeps renewing a session the user ended. */
 async function forgetLogin() {
     loginEpoch++;
+    const { robflowToken } = await chrome.storage.local.get('robflowToken');
     await chrome.storage.session.remove('robflowRefresh');
     await chrome.storage.local.remove('robflowToken');
+    await desktopSignedOut((robflowToken && robflowToken.email) || ''); // desktop.js
 }
 
 // Run inside a Studio tab (serialized by chrome.scripting — must stay self-contained). Each one
@@ -219,6 +229,7 @@ async function renewWith(refreshToken, epoch) {
     if (typeof data.refresh_token === 'string' && data.refresh_token && data.refresh_token !== refreshToken) {
         // Rotation: the old refresh token, Studio's copy included, is dead now. Keep open Studio
         // tabs in step so Studio doesn't sign out on its next renewal.
+        await chrome.storage.session.set({ robflowRetired: refreshToken });
         await storeRefreshToken(data.refresh_token);
         await inStudioTabs(writeStudioTokens, [STUDIO_TOKENS_KEY, refreshToken, data.access_token, data.refresh_token]);
     }
@@ -304,21 +315,6 @@ function isViewerSender(sender) {
 
 const isPopupSender = (sender) => sender.url === chrome.runtime.getURL('popup.html');
 
-// Source 2: observe outgoing request headers to the RobFlow API and lift the token. Studio sends
-// `Bearer <jwt>`; accept a bare JWT too. ONLY requests Studio itself made count: any website can
-// send its own (attacker-account) token to api.robco.studio, and adopting that would silently
-// attach the viewer to someone else's session. Registered at top level so the worker re-arms it.
-chrome.webRequest.onBeforeSendHeaders.addListener(
-    (details) => {
-        if (details.initiator !== STUDIO_ORIGIN) return;
-        const auth = (details.requestHeaders || []).find((h) => h.name.toLowerCase() === 'authorization');
-        const m = auth && auth.value && auth.value.trim().match(/^(?:Bearer\s+)?(ey[\w-]+\.[\w-]+\.[\w-]+)$/i);
-        if (m) captureToken(m[1], 'header');
-    },
-    { urls: [API_MATCH] },
-    ['requestHeaders', 'extraHeaders'],
-);
-
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || sender.id !== chrome.runtime.id) return false;
     // Source 1: our Studio content script's localStorage read.
@@ -368,3 +364,7 @@ chrome.storage.local.get(['robflowToken'], ({ robflowToken }) => {
         chrome.storage.local.remove('robflowToken');
     }
 });
+
+// The VC add-on handoff (native messaging + its renewal alarm). importScripts must run during the
+// worker's first evaluation so desktop.js's listeners are registered on every wake.
+importScripts('desktop.js');

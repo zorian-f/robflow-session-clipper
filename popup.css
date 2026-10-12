@@ -55,6 +55,10 @@ body {
   border-bottom: 1px solid #2c2c2e;
 }
 
+.row[hidden] {
+  display: none;
+}
+
 .value {
   font-size: 12px;
   color: #ebebf5;

@@ -1,7 +1,8 @@
 {
   "manifest_version": 3,
   "name": "RobFlow Session Clipper",
-  "version": "3.0.0",
+  "version": "3.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAxrpfiMdaMThxHOvT/uYNgBt7TC4nz0sMeR2kVckJMs0GmrW7H555Vos711U4KbtcMZ102foeOv1VQBPZwFwO6P9x+QTPs9+XvsS0skT4dA/Yi1Lb7/q03xbvDlaQ7F6KVdRH1V39jtM0vyPR45QCvDZo6fDRO+uku+uZYTWFG8GorB2LXVSPI8oX7Nxqf0xHiiIZU2zb+BUBEWYDkkZ8nJUjM+KFgUpZ43CoN8fJqOsLwALkZsqznblXqyn6QdctxVrG+4ArHd1MXb7qwS8sjI/20G+K6JLcewzw9bAug/t3fKNdJG2nfDFP927VudOr5704GLZbeAB0bAfnspvgsQIDAQAB",
   "description": "Hands the signed-in RobCo Studio session to the robot viewer: no page refresh, no copy/paste, no token in the URL.",
   "action": {
     "default_popup": "popup.html",
@@ -23,8 +24,9 @@
     "clipboardWrite",
     "activeTab",
     "storage",
-    "webRequest",
-    "scripting"
+    "scripting",
+    "nativeMessaging",
+    "alarms"
   ],
   "host_permissions": [
     "https://api.robco.studio/*",

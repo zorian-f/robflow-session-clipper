@@ -1,8 +1,8 @@
 # RobFlow Session Clipper
 
 A Chrome extension that captures a live RobFlow virtual-robot session **and** the Cognito token
-that authorizes control, and hands both to the robot viewer (Orrerium). No DevTools, no copy/paste,
-no page refresh after signing in.
+that authorizes control, and hands both to the robot viewer (Orrerium) and the RobCo Visual
+Components add-on. No DevTools, no copy/paste, no page refresh after signing in.
 
 ## What it does
 
@@ -13,6 +13,7 @@ no page refresh after signing in.
 | Launch the viewer | ❌ paste into the dialog | ✅ token in the URL | ✅ viewer pulls the token itself |
 | Token renewals reach the viewer | ❌ | ❌ | ✅ pushed to open viewer tabs |
 | Control past the 1 h token lifetime | ❌ | ❌ | ✅ renewed automatically, even with Studio closed |
+| Visual Components add-on | ❌ | ❌ | ✅ connected automatically (v3.1, see below) |
 
 The session URL alone gives a **view-only** link. The Cognito id token is what unlocks
 **control**: moving the robot, pushing/saving flows and reconfiguring modules.
@@ -29,10 +30,9 @@ refresh.
   the session iframe's SID, which catches the sign-in, Studio's own token renewals, session changes
   and sign-out. It passes the tokens to the background worker only, and injects an *Open in
   viewer* button on the session page.
-- **`background.js`** (service worker) stores the freshest id token. Its sources are the content
-  script, passive observation of `api.robco.studio` request headers (only from requests robco.studio
-  itself initiates, so no other site can plant a token), and an on-demand read from any
-  open Studio tab when a viewer asks and the stored token is stale. If nothing fresher is
+- **`background.js`** (service worker) stores the freshest id token. It sleeps until something
+  asks; it doesn't watch network traffic. Its sources are the content script and an on-demand
+  read from any open Studio tab when a viewer asks and the stored token is stale. If nothing fresher is
   available, it renews the id token itself through Studio's own endpoint
   (`POST /public/login/refresh-token`), so a connected viewer stays in control past the hour. On
   install or reload it re-injects its scripts into already-open tabs. It derives the current SID
@@ -44,8 +44,35 @@ refresh.
   current SID and id token, and pushes fresher tokens as they arrive. The manifest matches
   `*.web.app` because preview channel hosts can't be listed. The script checks the hostname and
   stays inert everywhere else.
+- **`desktop.js`** (part of the worker) hands the session to the RobCo Visual Components add-on.
+  See [Visual Components](#visual-components) below.
 - **`popup.js`** shows the session and token status (email, minutes left, where it came from) and
-  opens the viewer.
+  the VC link, and opens the viewer.
+
+## Visual Components
+
+The RobCo VC add-on (repo `robco-vc-addon`) follows the same login, with nothing to paste into
+its Connect field:
+
+1. Whenever the extension's token changes, `desktop.js` sends it with the current session id to
+   the add-on's helper through Chrome **native messaging** (host `com.robco.session_clipper`).
+2. Chrome starts the helper (`clipper_native_host.py` on VC's Python) only for this extension's ID,
+   which the manifest's `key` pins to `lcbedinbgcamhmjhenboamkmkkkfjigf`. The helper writes the token
+   DPAPI-encrypted to `%LOCALAPPDATA%\RobCoVC\session_inbox.json` and exits. Nothing keeps
+   listening between messages.
+3. The add-on checks that file at most once a second on VC's own tick and adopts the token into
+   its shared connection. Robots that follow the shared connection stay in control.
+4. An alarm renews the token about 5 minutes before it expires, so VC stays connected with no
+   viewer open. Signing out of Studio tells the add-on to drop the token.
+
+Rules on the VC side: a lab stack or robot you connected to there is never overridden, and a
+different account never replaces a live token. Only the 1 h id token reaches VC, never the
+refresh token.
+
+**Setup:** run the add-on's `install.ps1` (or *Update add-on.cmd*), which registers the helper for
+Chrome and Edge under `HKCU`. The popup then shows a **Visual Components** row ("linked · updated
+… ago"). Without the add-on installed, the extension tries the helper once per token change, finds
+nothing, and arms no alarm.
 
 ## Install
 
@@ -57,12 +84,14 @@ refresh.
 4. Click **Load unpacked** and select the repo folder
 
 Chrome asks for access to `robco.studio`, `api.robco.studio`, `web.app` sites and `localhost`.
-These are needed to read the Studio login, observe API headers, and talk to the viewer.
+These are needed to read the Studio login, call RobCo's session and renewal endpoints, and talk
+to the viewer. It also asks to communicate with cooperating native applications (the VC add-on's
+helper).
 
-**Upgrading from v2:** pull, then click the reload icon on the extension card in
-`chrome://extensions`. v3 needs more site access than v2. If Chrome shows the extension as
-disabled pending new permissions, re-enable it. Open Studio and viewer tabs pick up v3 without a
-refresh.
+**Upgrading from v3.0 or older:** v3.1 pins the extension ID (native messaging needs a fixed one),
+so Chrome treats it as a new extension. Pull, then in `chrome://extensions` **remove** the old
+*RobFlow Session Clipper* and **Load unpacked** the folder again. Its saved state (e.g. a custom
+viewer URL) starts fresh once. Open Studio and viewer tabs pick it up without a refresh.
 
 ## Usage
 

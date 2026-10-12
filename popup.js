@@ -1,7 +1,7 @@
 const SID_RE = /session\/(?:ws\/)?([^/?#]+)/;
 const SESSION_BASE = 'https://api.robco.studio/public/virtual-robot/session';
 const sessionUrlFor = (sid) => `${SESSION_BASE}/${sid}/`;
-const SOURCE_LABEL = { 'studio-storage': 'Studio tab', 'studio-tab': 'Studio tab', header: 'API traffic', renewed: 'auto-renewal' };
+const SOURCE_LABEL = { 'studio-storage': 'Studio tab', 'studio-tab': 'Studio tab', renewed: 'auto-renewal' };
 
 const el = (id) => document.getElementById(id);
 const sidValue = el('sidValue');
@@ -12,8 +12,10 @@ const copyUrlBtn = el('copyUrlBtn');
 const copyTokenBtn = el('copyTokenBtn');
 const statusDot = el('statusDot');
 const statusHint = el('statusHint');
+const vcRow = el('vcRow');
+const vcValue = el('vcValue');
 
-const state = { sid: null, token: null };
+const state = { sid: null, token: null, desktop: null };
 
 const tokenLive = () => !!(state.token && state.token.exp && state.token.exp * 1000 > Date.now());
 const minutesLeft = (exp) => (exp ? Math.max(0, Math.round((exp * 1000 - Date.now()) / 60000)) : null);
@@ -41,6 +43,15 @@ function render() {
         tokenValue.className = 'value empty';
     }
 
+    // The VC add-on handoff (desktop.js): only shown once its helper has answered.
+    vcRow.hidden = !state.desktop;
+    if (state.desktop) {
+        const ago = Math.max(0, Math.round((Date.now() - state.desktop.at) / 60000));
+        vcValue.textContent = state.desktop.ok ? `linked · updated ${ago ? `${ago} min ago` : 'just now'}`
+            : `helper error: ${state.desktop.error || 'unknown'}`;
+        vcValue.className = state.desktop.ok ? 'value ok' : 'value warn';
+    }
+
     const live = tokenLive();
     openBtn.disabled = !state.sid;
     openBtn.textContent = live ? '▶ Open in viewer (control)' : '▶ Open in viewer (view-only)';
@@ -58,9 +69,10 @@ function render() {
 
 /** Show what's stored right away, then refine with the background's fresh session (new SID, Studio-tab read). */
 function loadState() {
-    chrome.storage.local.get(['robflowSessionUrl', 'robflowToken', 'viewerBaseUrl'], (s) => {
+    chrome.storage.local.get(['robflowSessionUrl', 'robflowToken', 'viewerBaseUrl', 'desktopSync'], (s) => {
         viewerUrl.value = s.viewerBaseUrl || '';
         state.token = s.robflowToken || null;
+        state.desktop = s.desktopSync || null;
         chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
             // A session opened directly (api.robco.studio/…/session/<SID>/) beats the stored one.
             const tabUrl = (tabs[0] && tabs[0].url) || '';
@@ -72,8 +84,9 @@ function loadState() {
             chrome.runtime.sendMessage({ type: 'get-session' }, (res) => {
                 if (chrome.runtime.lastError || !res) return;
                 if (res.sid) state.sid = res.sid;
-                chrome.storage.local.get(['robflowToken'], ({ robflowToken }) => {
+                chrome.storage.local.get(['robflowToken', 'desktopSync'], ({ robflowToken, desktopSync }) => {
                     state.token = robflowToken || null;
+                    state.desktop = desktopSync || null;
                     render();
                 });
             });
