@@ -334,6 +334,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // A viewer bridge or the popup wants the session. Never answer anyone else.
     if (msg.type === 'get-session' && (isViewerSender(sender) || isPopupSender(sender))) {
         getSession().then(sendResponse, (e) => sendResponse({ sid: null, token: null, reason: String((e && e.message) || e) }));
+        // Opening the popup also (re)links the VC add-on right away - e.g. just after its helper was
+        // installed, when the stored token is still fresh and nothing else would push for ~55 min.
+        if (isPopupSender(sender)) syncDesktop();
         return true; // async response
     }
     // The popup's button or the one injected on the Studio session page.
@@ -354,6 +357,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     for (const tab of await chrome.tabs.query({ url: VIEWER_MATCHES })) {
         chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['bridge.js'] }).catch(() => {});
     }
+    syncDesktop(); // a stored, still-valid token reaches the VC add-on without waiting for a change
 });
 
 // On worker startup drop a stored credential that's expired OR not a Cognito id token (flushes an
